@@ -47,6 +47,6 @@ The notebooks write results here automatically. Key outputs include:
 
 ---
 
-> **Note:** Raw MS data are deposited in PRIDE (PXD059266).
+> **Note:** Raw MS data are deposited in PRIDE (PXD077939).
 > Source Excel files are not publicly deposited due to participant data privacy;
 > requests can be directed to pworley@jhmi.edu.
