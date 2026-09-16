@@ -1003,4 +1003,206 @@ save_table({"A4_correlation_change": A4, "A5_network_comparison": A5,
            "S_Table_network_analysis")
 save_table({"figure2_values": F2}, "S_Table_figure2_values")
 
+# ==============================================================================
+# STEP 13  --  Regression-to-the-mean diagnostics for the CSF NPTX2 decline
+# ==============================================================================
+# Baseline CSF NPTX2 is higher in the lithium arm, so a reviewer may ask whether
+# the larger one-year decline in that arm is simply regression to the mean.
+# Four independent diagnostics are reported.
+print("\nSTEP 13  regression-to-the-mean diagnostics")
+
+NPTX2_COLS = [("ELISA", "NPTX2_ELISA"), ("NULISA", "NPTX2_NULISA"), ("PRM", "NPTX2_PRM")]
+NPTX2_COLS = [(p, c) for p, c in NPTX2_COLS if dcol(c) in ar.columns]
+
+# (13a) Within each arm, is the baseline value correlated with the subsequent
+#       change?  Under pure regression to the mean this correlation is strongly
+#       negative.  A correlation near zero argues against it.
+rtm_within = []
+for pl, c in NPTX2_COLS:
+    d_c = dcol(c)
+    b_c = d_c.replace("d_log_", "base_log_") if d_c.startswith("d_log_") else "base_" + c
+    if b_c not in ar.columns:
+        continue
+    for arm in ["Lithium", "Placebo"]:
+        d = ar.loc[ar.arm == arm, [b_c, d_c]].dropna()
+        r, p = (stats.pearsonr(d[b_c], d[d_c]) if len(d) >= 10 else (np.nan, np.nan))
+        rtm_within.append({"platform": pl, "arm": arm, "n": len(d),
+                           "baseline_col": b_c, "change_col": d_c,
+                           "r_baseline_vs_change": r, "p": p})
+rtm_within = pd.DataFrame(rtm_within)
+print(rtm_within.round(4).to_string(index=False))
+
+# (13b) Reliability of the baseline measurement itself.  Regression to the mean
+#       is driven by measurement error, so a baseline that reproduces across
+#       three independent platforms leaves little room for it.
+rel = []
+for i in range(len(NPTX2_COLS)):
+    for j in range(i + 1, len(NPTX2_COLS)):
+        (p1, c1), (p2, c2) = NPTX2_COLS[i], NPTX2_COLS[j]
+        b1c = ("base_log_" + c1) if ("base_log_" + c1) in ar.columns else ("base_" + c1)
+        b2c = ("base_log_" + c2) if ("base_log_" + c2) in ar.columns else ("base_" + c2)
+        if b1c not in ar.columns or b2c not in ar.columns:
+            continue
+        d = ar[[b1c, b2c]].dropna()
+        r, p = (stats.pearsonr(d[b1c], d[b2c]) if len(d) >= 10 else (np.nan, np.nan))
+        rel.append({"pair": "%s vs %s" % (p1, p2), "n": len(d), "r": r, "p": p})
+rel = pd.DataFrame(rel)
+print(rel.round(4).to_string(index=False))
+
+# (13c) ANCOVA on the change score adjusting for a composite baseline averaged
+#       across platforms.  A composite carries less measurement error than any
+#       single platform, so if the effect is real it should survive, and if it
+#       is regression to the mean it should shrink.
+zs = lambda s: (s - s.mean()) / s.std(ddof=1)
+bcols = [(("base_log_" + c) if ("base_log_" + c) in ar.columns else ("base_" + c))
+         for _, c in NPTX2_COLS]
+bcols = [c for c in bcols if c in ar.columns]
+ar["base_NPTX2_composite"] = pd.concat([zs(ar[c]) for c in bcols], axis=1).mean(axis=1)
+
+rtm_ancova = []
+for pl, c in NPTX2_COLS:
+    d_c = dcol(c)
+    b_c = d_c.replace("d_log_", "base_log_") if d_c.startswith("d_log_") else "base_" + c
+    for adj_lab, adj in [("own baseline", b_c), ("composite baseline", "base_NPTX2_composite")]:
+        if adj not in ar.columns:
+            continue
+        d = ar[[d_c, adj, "arm"]].dropna().copy()
+        d["li"] = (d.arm == "Lithium").astype(int)
+        if len(d) < 12:
+            continue
+        X = sm.add_constant(d[["li", adj]].astype(float).values, has_constant="add")
+        m = sm.OLS(d[d_c].astype(float).values, X).fit()
+        lo, hi = m.conf_int()[1]
+        rtm_ancova.append({"platform": pl, "adjustment": adj_lab, "n": len(d),
+                           "beta_lithium": m.params[1], "ci_low": lo,
+                           "ci_high": hi, "p": m.pvalues[1]})
+rtm_ancova = pd.DataFrame(rtm_ancova)
+print(rtm_ancova.round(4).to_string(index=False))
+
+# (13d) Batch check.  If treatment arms were unevenly distributed across NULISA
+#       plates, a plate effect could masquerade as a treatment effect.
+plate_tab = pd.crosstab(meta.PlateID, meta.arm)
+try:
+    chi2, p_plate, dof, _ = stats.chi2_contingency(plate_tab.values)
+except Exception:
+    chi2 = p_plate = dof = np.nan
+print("  plate x arm chi-square: chi2 = %.3f, df = %s, P = %.3f" % (chi2, dof, p_plate))
+plate_out = plate_tab.reset_index()
+plate_out["chi2"] = chi2
+plate_out["df"] = dof
+plate_out["p"] = p_plate
+
+save_table({"baseline_vs_change": rtm_within,
+            "baseline_reliability": rel,
+            "ancova_own_vs_composite": rtm_ancova,
+            "plate_by_arm": plate_out},
+           "S_Table_RTM_diagnostics")
+
+
+# ==============================================================================
+# STEP 14  --  Gene Ontology enrichment of the cognition-associated analytes
+# ==============================================================================
+# The measured panel is not a random sample of the genome: it is composed
+# largely of synaptic and neuronal proteins.  Testing against a whole-genome
+# background would therefore return synaptic terms whatever the result, so the
+# primary analysis uses the measured panel as the background.  The whole-genome
+# version is reported alongside it for comparison only.
+print("\nSTEP 14  Gene Ontology enrichment")
+
+# Analyte labels that are not official gene symbols.
+SYMBOL_FIX = {"GluA4": "GRIA4", "GluA1": "GRIA1", "GluA2": "GRIA2", "GluA3": "GRIA3",
+              "pTau": "MAPT", "Tau": "MAPT", "Ab": "APP", "aSyn": "SNCA",
+              "NfL": "NEFL", "pTDP43": "TARDBP", "TDP43": "TARDBP",
+              "GFAP": "GFAP", "Abeta40": "APP", "Abeta42": "APP",
+              "IL1B": "IL1B", "CD200R1": "CD200R1", "14-3-3": "YWHAZ",
+              "YWHAZ": "YWHAZ", "S100B": "S100B", "PDGFRB": "PDGFRB"}
+
+
+def gene_symbol(analyte):
+    """Strip the platform suffix from an analyte label and return a gene symbol."""
+    base = re.sub(r"_(NULISA|PRM|ELISA)$", "", str(analyte))
+    return SYMBOL_FIX.get(base, base).upper()
+
+
+CDR_OUTCOME = "d_CDR_SB_h"
+go_src = corr[(corr.arm == "Lithium") & (corr.outcome == CDR_OUTCOME)].dropna(subset=["p"])
+gl_input = sorted({gene_symbol(a) for a in go_src.loc[go_src.p < 0.05, "analyte"]})
+gl_bg = sorted({gene_symbol(a) for a in go_src["analyte"]})
+print("  input genes: %d   panel background genes: %d" % (len(gl_input), len(gl_bg)))
+print("  input:", ", ".join(gl_input))
+
+GO_LIBS = ["GO_Biological_Process_2023", "GO_Cellular_Component_2023",
+           "GO_Molecular_Function_2023"]
+
+
+def fisher_enrich(genes, background, library_dict, min_overlap=2):
+    """Fisher exact enrichment of `genes` within `background` for one library."""
+    genes, background = set(genes) & set(background), set(background)
+    N = len(background)
+    out = []
+    for term, members in library_dict.items():
+        ann = set(m.upper() for m in members) & background
+        k = len(ann & genes)
+        if k < min_overlap or not ann:
+            continue
+        table = [[k, len(genes) - k], [len(ann) - k, N - len(genes) - len(ann) + k]]
+        odds, p = stats.fisher_exact(table, alternative="greater")
+        out.append({"term": term, "overlap": k, "n_input": len(genes),
+                    "n_term_in_background": len(ann), "n_background": N,
+                    "odds_ratio": odds, "p": p,
+                    "overlap_genes": ";".join(sorted(ann & genes))})
+    out = pd.DataFrame(out)
+    if len(out):
+        out["q_BH"] = bh(out.p)
+        out = out.sort_values("p").reset_index(drop=True)
+    return out
+
+
+go_tables, go_ok = {}, False
+try:
+    import gseapy
+    for lib in GO_LIBS:
+        lib_dict = gseapy.get_library(name=lib, organism="Human")
+        panel = fisher_enrich(gl_input, gl_bg, lib_dict)
+        panel.insert(0, "background", "measured panel (%d genes)" % len(gl_bg))
+        genome_bg = sorted({g.upper() for v in lib_dict.values() for g in v})
+        genome = fisher_enrich(gl_input, genome_bg, lib_dict)
+        genome.insert(0, "background", "whole genome (%d genes)" % len(genome_bg))
+        go_tables[lib.replace("GO_", "").replace("_2023", "")[:31]] = \
+            pd.concat([panel, genome], ignore_index=True)
+        print("  %s: %d terms (panel background), top P = %s"
+              % (lib, len(panel), "%.4g" % panel.p.iloc[0] if len(panel) else "na"))
+    go_ok = True
+except Exception as exc:
+    print("  GO enrichment skipped:", type(exc).__name__, exc)
+    print("  (gseapy needs internet access to Enrichr; run this step where that is allowed)")
+
+if go_ok:
+    go_tables["input_genes"] = pd.DataFrame({"gene": gl_input})
+    go_tables["background_genes"] = pd.DataFrame({"gene": gl_bg})
+    save_table(go_tables, "S_Table_GO_enrichment")
+
+    # Figure S3:  top terms under the measured-panel background.
+    fig, axes = plt.subplots(1, 2, figsize=(11.0, 3.6))
+    show = [k for k in ["Cellular_Component", "Biological_Process"] if k in go_tables]
+    for axx, key in zip(axes, show):
+        t = go_tables[key]
+        t = t[t.background.str.startswith("measured")].nsmallest(8, "p").iloc[::-1]
+        lab = [re.sub(r"\s*\(GO:\d+\)$", "", s) for s in t.term]
+        lab = [s if len(s) <= 46 else s[:43] + "..." for s in lab]
+        axx.barh(range(len(t)), -np.log10(t.p), color="#2E75B6", height=0.62)
+        axx.set_yticks(range(len(t)))
+        axx.set_yticklabels(lab, fontsize=7)
+        for i, (k, m) in enumerate(zip(t.overlap, t.n_term_in_background)):
+            axx.text(-np.log10(t.p.iloc[i]) + 0.05, i, "%d/%d" % (k, m),
+                     va="center", fontsize=6.2, color="#444")
+        axx.axvline(-np.log10(0.05), ls="--", lw=0.8, c="#999")
+        axx.set_xlabel(r"$-\log_{10}$ P (uncorrected)")
+        axx.set_title(key.replace("_", " "), fontsize=8.5)
+        axx.spines[["top", "right"]].set_visible(False)
+        axx.set_xlim(0, max(2.2, -np.log10(t.p.min()) * 1.35))
+    plt.tight_layout()
+    save_fig(fig, "FigureS3_GO_enrichment")
+    plt.close(fig)
+
 print("\nDone.  Tables in %s, figures in %s" % (OUT_T, OUT_F))

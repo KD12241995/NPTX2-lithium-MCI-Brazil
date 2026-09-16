@@ -44,7 +44,8 @@ scripts/
         Complete, self-contained reanalysis performed for the 2026 revision:
         quality control, metadata assembly, multiple-testing correction,
         between-arm comparisons, interaction tests, network analyses,
-        enrichment analysis, and all revised figures.
+        regression-to-the-mean diagnostics, Gene Ontology enrichment,
+        and all revised figures.
 ```
 
 ---
@@ -77,6 +78,33 @@ Key methodological specifications:
 - **Network analyses**: label-permutation and sample-size-matched down-sampling,
   with a threshold-independent mean absolute Fisher-z measure reported alongside
   edge counts.
+- **Regression to the mean**: because baseline CSF NPTX2 differs between arms,
+  four diagnostics are reported: the within-arm correlation between the baseline
+  value and the subsequent change, the cross-platform reliability of the baseline
+  measurement, an ANCOVA adjusted for a composite baseline averaged across the
+  three platforms, and a plate-by-arm contingency test.
+- **Enrichment analysis**: Fisher exact tests against Gene Ontology libraries
+  using the measured analyte panel as the background set (primary), because the
+  panel is composed largely of synaptic and neuronal proteins and a whole-genome
+  background would return enrichment reflecting the panel design. The
+  whole-genome background is reported alongside it for comparison.
+
+### Output files
+
+Running the script writes the following to `outputs/tables/` and
+`outputs/figures/`:
+
+| File | Contents |
+| --- | --- |
+| `meta_master.xlsx` | Long-format merged metadata, one row per CSF sample |
+| `analysis_ready.xlsx` | Participant-level analysis matrix (baseline values and one-year change scores) |
+| `Table1_baseline_characteristics.xlsx` | Baseline characteristics by treatment arm |
+| `S_Table_QC_and_sample_disposition.xlsx` | Analyte and sample quality control, analysis set sizes, baseline balance |
+| `S_Table_association_results.xlsx` | All correlations with FDR, between-arm comparison, interaction tests, within-arm change, leave-one-out diagnostics |
+| `S_Table_network_analysis.xlsx` | Correlation-change and network comparisons, and the reconciliation of the originally reported result |
+| `S_Table_figure2_values.xlsx` | Plotted values for Figure 2 |
+| `S_Table_RTM_diagnostics.xlsx` | Regression-to-the-mean diagnostics |
+| `S_Table_GO_enrichment.xlsx` | Gene Ontology enrichment under both background sets |
 
 ---
 
