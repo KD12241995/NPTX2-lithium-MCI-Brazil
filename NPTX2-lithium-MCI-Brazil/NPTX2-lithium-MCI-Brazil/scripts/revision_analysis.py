@@ -290,6 +290,20 @@ meta = (long.drop(columns=["arm_code"], errors="ignore")
                on="csf_id", how="left")
         .merge(prm2, on="csf_id", how="left"))
 
+# The clinical workbook encodes the timepoint by column block, while the vendor
+# pairing table encodes it by sample id.  They are independent sources, so they
+# are cross-checked here and any disagreement stops the run rather than being
+# resolved silently in favour of one of them.
+_tp_check = meta[["csf_id", "timepoint"]].dropna().drop_duplicates()
+_tp_check["from_pairing"] = _tp_check.csf_id.map(
+    lambda i: "base" if i in base_set else ("1y" if i in y1_set else None))
+_tp_conflict = _tp_check[(_tp_check.from_pairing.notna())
+                         & (_tp_check.timepoint != _tp_check.from_pairing)]
+assert len(_tp_conflict) == 0, \
+    "timepoint disagreement between clinical block and pairing table:\n%s" % _tp_conflict
+print("  timepoint cross-check: %d ids in both sources, 0 conflicts"
+      % int(_tp_check.from_pairing.notna().sum()))
+
 NUMCOLS = ["age_base", "CDR", "CDR_SB", "ADAS", "SLN", "TMTA", "TMTB", "delayed_rec",
            "figure_rec", "litemia", "NPTX2_ELISA", "NPTXR_ELISA", "Ab_ELISA",
            "Tau_ELISA", "pTau_ELISA", "AD_profile", "apoe4_carrier", "CIBIC"]
@@ -470,23 +484,32 @@ for arm in ["Lithium", "Placebo"]:
     A = ar[ar.arm == arm]
     for out in OUTCOMES:
         for c in D_ANALYTES:
-            d = A[[out, c, "age_base"]].dropna()
+            # The unadjusted estimates use every participant with both values.
+            # The age-adjusted estimate needs age as well, so it is computed on
+            # its own complete-case set and its n is reported separately.
+            d = A[[out, c]].dropna()
             n = len(d)
             rec = {"arm": arm, "outcome": out, "analyte": c.replace("d_log_", "").replace("d_", ""),
                    "platform": platform_of(c), "n": n}
             if n >= 10:
                 rec["r"], rec["p"] = stats.pearsonr(d[out], d[c])
                 rec["rho"], rec["p_spearman"] = stats.spearmanr(d[out], d[c])
+            else:
+                for k in ["r", "p", "rho", "p_spearman"]:
+                    rec[k] = np.nan
+            da = A[[out, c, "age_base"]].dropna()
+            rec["n_adjAge"] = len(da)
+            if len(da) >= 10:
                 try:
-                    pr, _ = stats.pearsonr(residual(d[c], d[["age_base"]]),
-                                           residual(d[out], d[["age_base"]]))
-                    t = pr * np.sqrt((n - 3) / max(1e-12, 1 - pr ** 2))
-                    rec["r_adjAge"], rec["p_adjAge"] = pr, 2 * stats.t.sf(abs(t), n - 3)
+                    pr, _ = stats.pearsonr(residual(da[c], da[["age_base"]]),
+                                           residual(da[out], da[["age_base"]]))
+                    t = pr * np.sqrt((len(da) - 3) / max(1e-12, 1 - pr ** 2))
+                    rec["r_adjAge"] = pr
+                    rec["p_adjAge"] = 2 * stats.t.sf(abs(t), len(da) - 3)
                 except Exception:
                     rec["r_adjAge"] = rec["p_adjAge"] = np.nan
             else:
-                for k in ["r", "p", "rho", "p_spearman", "r_adjAge", "p_adjAge"]:
-                    rec[k] = np.nan
+                rec["r_adjAge"] = rec["p_adjAge"] = np.nan
             rows.append(rec)
 corr = pd.DataFrame(rows)
 corr["q_pooled"] = corr["q_platform"] = np.nan
@@ -591,6 +614,47 @@ for (o, pl), g in interaction.groupby(["outcome", "platform"]):
     interaction.loc[g.index, "q_int_platform"] = bh(g.p_int)
 
 
+# The neuronal pentraxin axis is a four-member protein complex, defined from
+# prior biochemistry rather than from these data.  It is therefore also
+# corrected as its own family, separately from the panel-wide screen.
+PENTRAXIN_FAMILY = ["NPTX2_PRM", "NPTX1_PRM", "NPTXR_PRM", "GRIA4_PRM"]
+fam = corr[(corr.outcome == "d_CDR_SB_h") & (corr.analyte.isin(PENTRAXIN_FAMILY))].copy()
+fam["q_family"] = np.nan
+for arm, g in fam.groupby("arm"):
+    fam.loc[g.index, "q_family"] = bh(g.p)
+family_fdr = fam[["arm", "analyte", "n", "r", "p", "q_family",
+                  "q_platform", "q_pooled"]].sort_values(["arm", "p"])
+print("\n  four-analyte pentraxin family, BH within family:")
+print(family_fdr.round(4).to_string(index=False))
+
+
+# Reviewer request: the exposure-to-cognition relationship directly, and the
+# between-arm comparison of cognitive change itself, neither of which is
+# covered by the analyte-based loops above.
+rows = []
+for out in [o for o in OUTCOMES if o != "litemia_1y"]:
+    d = ar.loc[ar.arm == "Lithium", ["litemia_1y", out]].dropna()
+    rec = {"comparison": "plasma lithium vs %s (lithium arm)" % out, "n": len(d)}
+    if len(d) >= 10:
+        rec["r"], rec["p"] = stats.pearsonr(d.litemia_1y, d[out])
+        rec["rho"], rec["p_spearman"] = stats.spearmanr(d.litemia_1y, d[out])
+    rows.append(rec)
+for out in [o for o in OUTCOMES if o != "litemia_1y"]:
+    L = ar.loc[ar.arm == "Lithium", out].dropna()
+    P = ar.loc[ar.arm == "Placebo", out].dropna()
+    if len(L) < 5 or len(P) < 5:
+        continue
+    t, pt = stats.ttest_ind(L, P, equal_var=False)
+    u, pu = stats.mannwhitneyu(L, P)
+    rows.append({"comparison": "between-arm difference in %s" % out,
+                 "n": len(L) + len(P), "n_Lithium": len(L), "n_Placebo": len(P),
+                 "mean_Lithium": L.mean(), "mean_Placebo": P.mean(),
+                 "p": pt, "p_mannwhitney": pu})
+cognition = pd.DataFrame(rows)
+print("\n  exposure-to-cognition and between-arm cognitive change:")
+print(cognition.round(4).to_string(index=False))
+
+
 # ==============================================================================
 # STEP 8  --  Influence diagnostics
 # ==============================================================================
@@ -607,9 +671,14 @@ def loo_range(arm, out, col):
 
 loo = pd.DataFrame([loo_range(a, o, c) for a, o, c in
                     [("Lithium", "d_CDR_SB_h", "d_NPTX2_PRM"),
+                     ("Lithium", "d_CDR_SB_h", dcol("NPTX2_ELISA")),
+                     ("Lithium", "d_CDR_SB_h", "d_NPTX2_NULISA"),
                      ("Lithium", "d_CDR_SB_h", "d_GRIA4_PRM"),
                      ("Lithium", "d_CDR_SB_h", "d_NPTX1_PRM"),
                      ("Lithium", "d_CDR_SB_h", "d_NPTXR_PRM"),
+                     ("Lithium", "d_CDR_SB_h", "d_VGF_PRM"),
+                     ("Lithium", "litemia_1y", dcol("NPTX2_ELISA")),
+                     ("Lithium", "litemia_1y", dcol("pTau_ELISA")),
                      ("Placebo", "d_CDR_SB_h", "d_NPTX2_PRM")]
                     if c in ar.columns])
 print(loo.round(3).to_string(index=False))
@@ -664,13 +733,22 @@ for platform, ref in [("NULISA", "NPTX2_NULISA"), ("PRM", "NPTX2_PRM")]:
         rng = np.random.default_rng(SEED)
         boot = np.array([rvec(Y[i]) - rvec(B[i])
                          for i in (rng.integers(0, n, (N_BOOT, n)))])
-        p_boot = 2 * np.minimum((boot <= 0).mean(0), (boot >= 0).mean(0))
+        # A resample can make a column constant, which returns NaN.  Those draws
+        # are dropped per analyte rather than counted, and an analyte with too
+        # few usable draws is reported as NaN instead of a spuriously small P.
+        valid = np.isfinite(boot)
+        n_valid = valid.sum(0)
+        le = np.where(valid & (boot <= 0), 1, 0).sum(0)
+        ge = np.where(valid & (boot >= 0), 1, 0).sum(0)
+        with np.errstate(invalid="ignore", divide="ignore"):
+            p_boot = np.minimum(1.0, 2 * np.minimum(le, ge) / n_valid)
+        p_boot = np.where(n_valid >= 0.5 * N_BOOT, p_boot, np.nan)
         A4.append(pd.DataFrame({"platform": platform, "arm": arm,
                                 "analyte": D[arm]["names"], "n": n,
                                 "r_base": rb, "r_1y": ry, "delta_r": ry - rb,
-                                "ci_lo": np.percentile(boot, 2.5, axis=0),
-                                "ci_hi": np.percentile(boot, 97.5, axis=0),
-                                "p_boot": p_boot,
+                                "ci_lo": np.nanpercentile(boot, 2.5, axis=0),
+                                "ci_hi": np.nanpercentile(boot, 97.5, axis=0),
+                                "n_boot_valid": n_valid, "p_boot": p_boot,
                                 "q_boot": bh(np.clip(p_boot, 1e-4, 1))}))
 
     obs = {}
@@ -683,11 +761,18 @@ for platform, ref in [("NULISA", "NPTX2_NULISA"), ("PRM", "NPTX2_PRM")]:
 
     nmin = min(D["Lithium"]["n"], D["Placebo"]["n"])
     rng = np.random.default_rng(SEED + 1)
-    ds = {arm: np.array([edge_count(D[arm]["y1"][rng.choice(D[arm]["n"], nmin, False)])[0]
-                         - edge_count(D[arm]["base"][rng.choice(D[arm]["n"], nmin, False)])[0]
-                         for _ in range(N_DOWNSAMPLE)]) for arm in ["Lithium", "Placebo"]}
-    p_ds = 2 * min((ds["Lithium"] <= ds["Placebo"]).mean(),
-                   (ds["Lithium"] >= ds["Placebo"]).mean())
+    # The two timepoints must be down-sampled to the SAME participants.  Drawing
+    # them independently would rebuild the baseline and follow-up correlation
+    # matrices from different people, which is the very artefact this analysis
+    # was written to rule out.
+    def ds_draw(arm):
+        idx = rng.choice(D[arm]["n"], nmin, False)
+        return edge_count(D[arm]["y1"][idx])[0] - edge_count(D[arm]["base"][idx])[0]
+
+    ds = {arm: np.array([ds_draw(arm) for _ in range(N_DOWNSAMPLE)])
+          for arm in ["Lithium", "Placebo"]}
+    p_ds = min(1.0, 2 * min((ds["Lithium"] <= ds["Placebo"]).mean(),
+                            (ds["Lithium"] >= ds["Placebo"]).mean()))
 
     allB = np.vstack([D["Lithium"]["base"], D["Placebo"]["base"]])
     allY = np.vstack([D["Lithium"]["y1"], D["Placebo"]["y1"]])
@@ -996,7 +1081,8 @@ save_table({"analyte_QC": qc,
            "S_Table_QC_and_sample_disposition")
 save_table({"summary": summary, "correlations": corr,
             "arm_comparison": arm_compare, "interaction": interaction,
-            "within_arm_change": paired_within, "leave_one_out": loo},
+            "within_arm_change": paired_within, "leave_one_out": loo,
+            "pentraxin_family_FDR": family_fdr, "cognition_analyses": cognition},
            "S_Table_association_results")
 save_table({"A4_correlation_change": A4, "A5_network_comparison": A5,
             "reconciliation_ladder": reconciliation},
@@ -1131,19 +1217,26 @@ gl_bg = sorted({gene_symbol(a) for a in go_src["analyte"]})
 print("  input genes: %d   panel background genes: %d" % (len(gl_input), len(gl_bg)))
 print("  input:", ", ".join(gl_input))
 
-GO_LIBS = ["GO_Biological_Process_2023", "GO_Cellular_Component_2023",
-           "GO_Molecular_Function_2023"]
+# Library versions are pinned to the release used for the reported results.
+GO_LIBS = ["GO_Biological_Process_2025", "GO_Cellular_Component_2025",
+           "GO_Molecular_Function_2025"]
 
 
-def fisher_enrich(genes, background, library_dict, min_overlap=2):
+def fisher_enrich(genes, background, library_dict, min_overlap=1):
     """Fisher exact enrichment of `genes` within `background` for one library."""
     genes, background = set(genes) & set(background), set(background)
     N = len(background)
     out = []
     for term, members in library_dict.items():
+        # Terms with no input gene have p = 1 by construction and are not
+        # informative; enrichment is defined only for terms the input set
+        # actually touches, which is also how Enrichr, DAVID and clusterProfiler
+        # build their correction sets.  min_overlap therefore defaults to 1 and
+        # is applied before, not after, the Benjamini-Hochberg step, so that the
+        # size of the correction set does not depend on the observed result.
         ann = set(m.upper() for m in members) & background
         k = len(ann & genes)
-        if k < min_overlap or not ann:
+        if not ann or k < min_overlap:
             continue
         table = [[k, len(genes) - k], [len(ann) - k, N - len(genes) - len(ann) + k]]
         odds, p = stats.fisher_exact(table, alternative="greater")
