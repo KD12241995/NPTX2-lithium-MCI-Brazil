@@ -45,7 +45,7 @@ scripts/
         quality control, metadata assembly, multiple-testing correction,
         between-arm comparisons, interaction tests, network analyses,
         regression-to-the-mean diagnostics, Gene Ontology enrichment,
-        and all revised figures.
+        quality-control sensitivity analyses, and all revised figures.
 ```
 
 ---
@@ -83,6 +83,12 @@ Key methodological specifications:
   value and the subsequent change, the cross-platform reliability of the baseline
   measurement, an ANCOVA adjusted for a composite baseline averaged across the
   three platforms, and a plate-by-arm contingency test.
+- **Quality-control sensitivity**: the one NULISA sample falling just below the
+  vendor's 70% sample-detectability threshold was retained, because excluding it
+  would have broken a longitudinal pair; all NULISA NPTX2 analyses are repeated
+  with that participant removed. The plate composition of the longitudinal pairs
+  is reported alongside, since a plate-by-arm test alone does not address plate
+  effects on within-person change.
 - **Enrichment analysis**: Fisher exact tests against Gene Ontology libraries
   using the measured analyte panel as the background set (primary), because the
   panel is composed largely of synaptic and neuronal proteins and a whole-genome
@@ -105,6 +111,7 @@ Running the script writes the following to `outputs/tables/` and
 | `S_Table_figure2_values.xlsx` | Plotted values for Figure 2 |
 | `S_Table_RTM_diagnostics.xlsx` | Regression-to-the-mean diagnostics |
 | `S_Table_GO_enrichment.xlsx` | Gene Ontology enrichment under both background sets |
+| `S_Table_lowQC_sensitivity.xlsx` | NULISA low-QC sample sensitivity analysis and plate composition of the longitudinal pairs |
 
 ---
 

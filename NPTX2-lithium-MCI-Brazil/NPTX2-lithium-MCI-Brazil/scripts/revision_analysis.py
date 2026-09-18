@@ -1205,4 +1205,88 @@ if go_ok:
     save_fig(fig, "FigureS3_GO_enrichment")
     plt.close(fig)
 
+# ==============================================================================
+# STEP 15  --  Low-QC sample sensitivity analysis (NULISA)
+# ==============================================================================
+# One NULISA sample fell just below the vendor's 70% sample-detectability
+# threshold for CSF.  It was retained because excluding it would have broken a
+# longitudinal pair.  This step repeats the NULISA NPTX2 analyses with that
+# participant removed, so the effect of the decision can be inspected directly.
+print("\nSTEP 15  low-QC sample sensitivity analysis")
+
+low_samples = sample_det[sample_det < SAMPLE_QC_MIN]
+if len(low_samples) == 0:
+    print("  no sample falls below the %.0f%% threshold; nothing to test."
+          % (SAMPLE_QC_MIN * 100))
+else:
+    low_name = low_samples.index[0]
+    low_row = samples.loc[samples.SampleName == low_name].iloc[0]
+    low_pid = low_row.participant_id
+    low_arm = arm_map.set_index("participant_id").arm.get(low_pid, "unknown")
+    print("  low-QC sample: %s  (participant %s, %s arm, %s, detectability %.1f%%)"
+          % (low_name, low_pid, low_arm, low_row.timepoint, low_samples.iloc[0] * 100))
+
+    D_NP = dcol("NPTX2_NULISA")
+    B_NP = ("base_log_NPTX2_NULISA" if "base_log_NPTX2_NULISA" in ar.columns
+            else "base_NPTX2_NULISA")
+
+    def nulisa_panel(tag, A):
+        rec = {"analysis_set": tag}
+        for arm in ["Lithium", "Placebo"]:
+            s = A.loc[A.arm == arm, D_NP].dropna()
+            rec["n_" + arm] = len(s)
+            rec["mean_change_" + arm] = s.mean() if len(s) else np.nan
+            rec["P_paired_t_" + arm] = stats.ttest_1samp(s, 0).pvalue if len(s) > 2 else np.nan
+            rec["P_wilcoxon_" + arm] = stats.wilcoxon(s).pvalue if len(s) > 2 else np.nan
+        L = A[A.arm == "Lithium"]
+        for lab, out in [("CDRSB", "d_CDR_SB_h"), ("plasma_Li", "litemia_1y")]:
+            if out not in A.columns:
+                continue
+            d = L[[D_NP, out]].dropna()
+            rec["n_" + lab] = len(d)
+            if len(d) >= 10:
+                rec["r_" + lab], rec["P_" + lab] = stats.pearsonr(d[D_NP], d[out])
+            else:
+                rec["r_" + lab] = rec["P_" + lab] = np.nan
+        if B_NP in A.columns:
+            d = A[[D_NP, B_NP, "arm"]].dropna()
+            X = sm.add_constant(pd.concat(
+                [(d.arm == "Lithium").astype(float).rename("li"),
+                 d[B_NP].astype(float)], axis=1), has_constant="add")
+            m = sm.OLS(d[D_NP].astype(float), X).fit()
+            lo, hi = m.conf_int().loc["li"]
+            rec.update({"n_ANCOVA": len(d), "beta_ANCOVA": m.params["li"],
+                        "ci_lo_ANCOVA": lo, "ci_hi_ANCOVA": hi,
+                        "P_ANCOVA": m.pvalues["li"]})
+        return rec
+
+    sens = pd.DataFrame([nulisa_panel("all samples (primary)", ar),
+                         nulisa_panel("excluding participant %s" % low_pid,
+                                      ar[ar.participant_id != low_pid])])
+    cols = [c for c in sens.columns if c != "analysis_set"]
+    print(sens.set_index("analysis_set")[cols].T.round(4).to_string())
+
+    # Plate composition of the longitudinal pairs, reported alongside, because a
+    # plate-by-arm test alone does not address plate effects on within-person
+    # change.  Pairs split across plates carry plate variation as noise rather
+    # than as a systematic between-arm difference.
+    pl = (nul_wide.reset_index()[["SampleName", "participant_id", "PlateID"]]
+          .dropna(subset=["participant_id"]).drop_duplicates())
+    n_samp = pl.groupby("participant_id").SampleName.nunique()
+    n_plate = pl.groupby("participant_id").PlateID.nunique()
+    complete = n_samp[n_samp == 2].index
+    split = int((n_plate[complete] > 1).sum())
+    plate_pairs = pd.DataFrame([{
+        "participants_with_NULISA_data": int(len(n_samp)),
+        "complete_longitudinal_pairs": int(len(complete)),
+        "pairs_split_across_plates": split,
+        "pairs_on_one_plate": int(len(complete)) - split}])
+    print("\n  complete NULISA pairs: %d, of which %d have their two timepoints "
+          "on different plates" % (len(complete), split))
+
+    save_table({"nulisa_lowQC_sensitivity": sens,
+                "plate_composition_of_pairs": plate_pairs,
+                "sample_detectability": sample_det.rename("detectability").reset_index()},
+               "S_Table_lowQC_sensitivity")
+
 print("\nDone.  Tables in %s, figures in %s" % (OUT_T, OUT_F))
